@@ -1,0 +1,12 @@
+# Python/Notebook junk
+__pycache__/
+.ipynb_checkpoints/
+
+# Local app outputs
+*.csv
+*.txt
+*.docx
+
+# OS
+.DS_Store
+Thumbs.db
