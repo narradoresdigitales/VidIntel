@@ -99,24 +99,40 @@ def search_youtube(query, lang, region, max_results, published_after):
     return r.json().get("items", [])
 
 
+
 def fetch_video_details(video_ids):
     params = {
         "part": "contentDetails,statistics",
         "id": ",".join(video_ids),
         "key": API_KEY,
     }
+
     r = requests.get(VIDEOS_URL, params=params, timeout=30)
     r.raise_for_status()
 
-    out = {}
+    details = {}
+
     for item in r.json().get("items", []):
-        vid = item["id"]
-        dur_iso = item["contentDetails"]["duration"]
-        out[vid] = {
-            "duration_sec": iso8601_to_seconds(dur_iso),
-            "views": int(item["statistics"].get("viewCount", 0)),
+        vid = item.get("id")
+
+        # ✅ Safely extract duration
+        dur_iso = (
+            item.get("contentDetails", {}).get("duration")
+        )
+
+        if dur_iso:
+            duration_sec = iso8601_to_seconds(dur_iso)
+        else:
+            # Unknown or unavailable duration
+            duration_sec = 0
+
+        details[vid] = {
+            "duration_sec": duration_sec,
+            "views": int(item.get("statistics", {}).get("viewCount", 0)),
         }
-    return out
+
+    return details
+
 
 
 def strict_language_filter(items, target_lang):
