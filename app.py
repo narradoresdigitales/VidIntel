@@ -206,7 +206,7 @@ st.markdown(
 with st.sidebar:
     st.header("🔎 Search Filters")
 
-    query = st.text_input("Topic / Query", "Kubernetes tutorial")
+    query = st.text_input("Topic / Query", " ")
 
     lang = st.selectbox(
         "Language",
