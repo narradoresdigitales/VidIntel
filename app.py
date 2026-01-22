@@ -196,8 +196,7 @@ def export_docx(df):
 # -------------------------
 # UI
 # -------------------------
-st.title("📺 VidIntel")
-st.subheader("Multilingual YouTube Discovery")
+st.title("🎯 VidIntel — Multilingual YouTube Discovery")
 
 st.markdown(
     "Search and filter YouTube videos by **language**, **region**, **date**, "
@@ -211,23 +210,67 @@ with st.sidebar:
 
     lang = st.selectbox(
         "Language",
-        [("English","en"), ("Japanese","ja"), ("Spanish","es"),
-         ("French","fr"), ("German","de"), ("Russian","ru"),
-         ("Arabic","ar"), ("Persian (Farsi)","fa")],
+        [
+            ("English", "en"),
+            ("Spanish", "es"),
+            ("French", "fr"),
+            ("German", "de"),
+            ("Russian", "ru"),
+            ("Arabic", "ar"),
+            ("Persian (Farsi)", "fa"),
+            ("Japanese", "ja"),
+            ("Korean", "ko"),
+        ],
         format_func=lambda x: x[0]
     )[1]
 
+    REGIONS = [
+        ("Any region", None),
+
+        # Spanish-speaking
+        ("ES (Spain — Europe)", "ES"),
+        ("MX (Mexico — North America)", "MX"),
+        ("AR (Argentina — South America)", "AR"),
+        ("CO (Colombia — South America)", "CO"),
+        ("CL (Chile — South America)", "CL"),
+        ("PE (Peru — South America)", "PE"),
+        ("DO (Dominican Republic — Caribbean)", "DO"),
+
+        # Russian-speaking
+        ("RU (Russia)", "RU"),
+        ("KZ (Kazakhstan)", "KZ"),
+        ("BY (Belarus)", "BY"),
+        ("UA (Ukraine)", "UA"),
+
+        # Arabic-speaking
+        ("EG (Egypt)", "EG"),
+        ("SA (Saudi Arabia)", "SA"),
+        ("AE (United Arab Emirates)", "AE"),
+
+        # Persian-speaking
+        ("IR (Iran)", "IR"),
+        ("AF (Afghanistan)", "AF"),
+
+        # East Asia
+        ("JP (Japan)", "JP"),
+        ("KR (South Korea)", "KR"),
+
+        # English-dominant
+        ("US (United States)", "US"),
+        ("GB (United Kingdom)", "GB"),
+        ("CA (Canada)", "CA"),
+        ("AU (Australia)", "AU"),
+    ]
+
     region = st.selectbox(
         "Region",
-        [("Any",""), ("US", "US"), ("JP","JP"), ("EG","EG"),
-         ("SA","SA"), ("RU","RU"), ("IR","IR")],
+        REGIONS,
         format_func=lambda x: x[0]
-    )[1] or None
+    )[1]
 
     date_filter = st.selectbox(
         "Date range",
-        ["No filter", "Last 24 hours", "Last 72 hours",
-         "Last 7 days", "This month", "This year"]
+        ["No filter", "Last 24 hours", "Last 72 hours", "Last 7 days", "This month", "This year"]
     )
 
     duration_filter = st.selectbox(
