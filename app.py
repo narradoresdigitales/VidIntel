@@ -1,7 +1,7 @@
 
 # =========================================================
 # VidIntel — YouTube + RSS Article Discovery (Multilingual)
-# Fully Integrated Streamlit Application
+# Streamlit Application (Refactored for improved UI/UX)
 # =========================================================
 
 import re
@@ -45,6 +45,60 @@ if not API_KEY:
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+
+
+# =========================================================
+# Human-friendly labels for Languages & Regions
+# =========================================================
+
+LANG_LABELS = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "fa": "Persian (Farsi)",
+    "ja": "Japanese",
+    "ko": "Korean",
+}
+
+# Options for selectboxes: list of (Label, Code) tuples
+VIDEO_LANG_OPTIONS = [(name, code) for code, name in LANG_LABELS.items()]
+ARTICLE_LANG_OPTIONS = [(name, code) for code, name in LANG_LABELS.items()]
+
+REGIONS = [
+    ("Any region", None),
+
+    # English-dominant
+    ("US (United States)", "US"),
+    ("GB (United Kingdom)", "GB"),
+    ("CA (Canada)", "CA"),
+    ("AU (Australia)", "AU"),
+
+    # Spanish-speaking
+    ("ES (Spain — Europe)", "ES"),
+    ("MX (Mexico — North America)", "MX"),
+    ("AR (Argentina — South America)", "AR"),
+    ("CO (Colombia — South America)", "CO"),
+    ("CL (Chile — South America)", "CL"),
+    ("PE (Peru — South America)", "PE"),
+    ("DO (Dominican Republic — Caribbean)", "DO"),
+
+    # Russian-speaking
+    ("RU (Russia)", "RU"),
+    ("KZ (Kazakhstan)", "KZ"),
+    ("UA (Ukraine)", "UA"),
+
+    # Arabic-speaking
+    ("EG (Egypt)", "EG"),
+    ("SA (Saudi Arabia)", "SA"),
+    ("AE (United Arab Emirates)", "AE"),
+
+    # East Asia
+    ("JP (Japan)", "JP"),
+    ("KR (South Korea)", "KR"),
+]
 
 
 # =========================================================
@@ -101,6 +155,9 @@ def search_youtube(query, lang, region, max_results, published_after):
 
 
 def fetch_video_details(video_ids):
+    if not video_ids:
+        return {}
+
     params = {
         "part": "contentDetails,statistics",
         "id": ",".join(video_ids),
@@ -154,7 +211,7 @@ def youtube_to_dataframe(items, details):
     return pd.DataFrame(rows)
 
 
-def export_txt(df):
+def export_videos_txt(df):
     lines = []
     for i, r in df.iterrows():
         lines += [
@@ -168,7 +225,7 @@ def export_txt(df):
     return "\n".join(lines)
 
 
-def export_docx(df):
+def export_videos_docx(df):
     if not Document:
         return None
     doc = Document()
@@ -260,21 +317,38 @@ def fetch_articles(sources, days_back=7, keyword=None):
 
     for name, url in sources.items():
         try:
-            feed = requests.get(url, timeout=10).text
+            resp = requests.get(url, timeout=10, headers={"User-Agent": "VidIntelBot/1.0"})
+            resp.raise_for_status()
+            xml_text = resp.text
         except Exception:
             continue
 
-        parsed = BeautifulSoup(feed, "xml")
-        items = parsed.find_all("item")
+        soup_xml = BeautifulSoup(xml_text, "xml")
 
-        for entry in items:
-            title = entry.title.text if entry.title else ""
-            link = entry.link.text if entry.link else ""
-            pub = entry.pubDate.text if entry.pubDate else ""
-            summary_html = entry.description.text if entry.description else ""
+        # Prefer RSS <item>; fall back to Atom <entry>
+        entries = soup_xml.find_all("item")
+        is_atom = False
+        if not entries:
+            entries = soup_xml.find_all("entry")
+            is_atom = True
 
+        for entry in entries:
+            if not is_atom:
+                title = (entry.title.text if entry.title else "").strip()
+                link = (entry.link.text if entry.link else "").strip()
+                pub = (entry.pubDate.text if entry.pubDate else "").strip()
+                summary_html = (entry.description.text if entry.description else "")
+            else:
+                # Atom format
+                title = (entry.title.text if entry.title else "").strip()
+                link_tag = entry.find("link")
+                link = (link_tag.get("href") if link_tag and link_tag.has_attr("href") else "").strip()
+                pub = (entry.updated.text if entry.updated else entry.published.text if entry.find("published") else "").strip()
+                summary_html = (entry.summary.text if entry.summary else "")
+
+            # Parse timestamp
             try:
-                ts = dateparser.parse(pub).timestamp()
+                ts = dateparser.parse(pub).timestamp() if pub else None
             except Exception:
                 ts = None
 
@@ -293,6 +367,16 @@ def fetch_articles(sources, days_back=7, keyword=None):
                 "Summary": BeautifulSoup(summary_html, "html.parser").get_text().strip()
             })
 
+    # Sort by Published desc when possible
+    def sort_key(row):
+        from dateutil import parser as dateparser  # local import to satisfy cache hash
+        try:
+            return dateparser.parse(row["Published"])
+        except Exception:
+            # Put unparsable dates at the bottom
+            return datetime.min.replace(tzinfo=timezone.utc)
+
+    rows.sort(key=sort_key, reverse=True)
     return pd.DataFrame(rows)
 
 
@@ -325,37 +409,24 @@ with st.sidebar:
         ["Videos", "Articles", "Both"]
     )
 
-    keyword = st.text_input("Keyword / Query", "")
+    keyword = st.text_input("Keyword / Query", "", placeholder="e.g., AI, defense, inflation")
 
-    # YouTube filters
-    lang = st.selectbox(
+    # -------------------------
+    # 🎬 Video Filters (readable labels)
+    # -------------------------
+    video_lang_label, lang = st.selectbox(
         "Video Language",
-        [
-            ("English", "en"),
-            ("Spanish", "es"),
-            ("French", "fr"),
-            ("German", "de"),
-            ("Russian", "ru"),
-            ("Arabic", "ar"),
-            ("Persian (Farsi)", "fa"),
-            ("Japanese", "ja"),
-            ("Korean", "ko"),
-        ],
+        VIDEO_LANG_OPTIONS,
+        index=0,
         format_func=lambda x: x[0]
-    )[1]
+    )
 
-    region = st.selectbox(
+    video_region_label, region = st.selectbox(
         "Region",
-        [
-            ("Any region", None),
-            ("US", "US"), ("GB", "GB"), ("CA", "CA"), ("AU", "AU"),
-            ("MX", "MX"), ("ES", "ES"), ("AR", "AR"), ("CO", "CO"),
-            ("RU", "RU"), ("KZ", "KZ"), ("UA", "UA"),
-            ("EG", "EG"), ("SA", "SA"),
-            ("JP", "JP"), ("KR", "KR"),
-        ],
+        REGIONS,
+        index=0,
         format_func=lambda x: x[0]
-    )[1]
+    )
 
     date_filter = st.selectbox(
         "Video Date Range",
@@ -372,18 +443,20 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Article settings
-    st.subheader("Article Settings")
-    article_lang = st.selectbox(
+    # -------------------------
+    # 📰 Article Filters (readable labels)
+    # -------------------------
+    article_lang_label, article_lang = st.selectbox(
         "Article Language",
-        list(CURATED_RSS.keys()),
-        index=0
+        ARTICLE_LANG_OPTIONS,
+        index=0,
+        format_func=lambda x: x[0]
     )
 
     days_back = st.slider("Article Days Back", 1, 30, 7)
-    user_site = st.text_input("Auto-discover RSS from site (optional)", "")
+    user_site = st.text_input("Auto-discover RSS from site (optional)", "", placeholder="https://example.com")
 
-    run = st.button("🔍 Search")
+    run = st.button("🔍 Search", type="primary")
 
 
 # =========================================================
@@ -396,6 +469,7 @@ if run and not keyword.strip():
 
 videos_df = None
 articles_df = None
+article_sources_count = 0  # for UX caption
 
 if run:
     # -------------------------
@@ -411,7 +485,6 @@ if run:
 
             # Duration filtering
             if duration_filter != "Any":
-
                 def ok(d):
                     m = d / 60
                     return (
@@ -419,7 +492,6 @@ if run:
                         (duration_filter == "5–10 min" and 5 <= m <= 10) or
                         (duration_filter == "> 10 min" and m > 10)
                     )
-
                 items = [
                     it for it in items
                     if ok(details.get(it["id"]["videoId"], {}).get("duration_sec", 0))
@@ -436,6 +508,7 @@ if run:
     if content_type in ["Articles", "Both"]:
         with st.spinner("Fetching articles…"):
             sources = get_article_sources(article_lang, user_site or None)
+            article_sources_count = len(sources)
             articles_df = fetch_articles(
                 sources,
                 days_back=days_back,
@@ -453,6 +526,10 @@ tabs = st.tabs(["📺 Videos", "📰 Articles"])
 # VIDEOS TAB
 # -------------------------
 with tabs[0]:
+    st.markdown(
+        f"##### Filters: **{video_lang_label}** | **{video_region_label or 'Any region'}** | **{date_filter}** | **{duration_filter}**"
+    )
+
     if videos_df is None:
         st.info("⚠️ Choose 'Videos' or 'Both' to search for YouTube content.")
     elif videos_df.empty:
@@ -468,6 +545,7 @@ with tabs[0]:
             }
         )
 
+        from io import BytesIO
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -480,14 +558,13 @@ with tabs[0]:
         with col2:
             st.download_button(
                 "⬇️ TXT",
-                export_txt(videos_df).encode("utf-8"),
+                export_videos_txt(videos_df).encode("utf-8"),
                 "videos.txt",
                 "text/plain"
             )
         with col3:
-            doc = export_docx(videos_df)
+            doc = export_videos_docx(videos_df)
             if doc:
-                from io import BytesIO
                 buf = BytesIO()
                 doc.save(buf)
                 st.download_button(
@@ -501,6 +578,10 @@ with tabs[0]:
 # ARTICLES TAB
 # -------------------------
 with tabs[1]:
+    st.markdown(
+        f"##### Filters: **{article_lang_label}** | Days back: **{days_back}** | Sources: **{article_sources_count}**"
+    )
+
     if articles_df is None:
         st.info("⚠️ Choose 'Articles' or 'Both' to search for news content.")
     elif articles_df.empty:
@@ -517,15 +598,21 @@ with tabs[1]:
 
         for _, row in articles_df.iloc[start:end].iterrows():
             with st.container(border=True):
-                st.markdown(f"### {row['Title']}")
-                st.markdown(f"**{row['Source']} — {row['Published']}**")
-                with st.expander("Summary"):
-                    st.write(row["Summary"])
+                st.markdown(
+                    f"### {row['Title']}  \n"
+                    f"<small>{row['Source']} — {row['Published']} &nbsp;&nbsp;|&nbsp;&nbsp; "
+                    f"**Lang:** {article_lang_label}</small>",
+                    unsafe_allow_html=True
+                )
+                if row.get("Summary"):
+                    with st.expander("Summary", expanded=False):
+                        st.write(row["Summary"])
                 st.link_button("Open Article ↗", row["URL"])
 
         st.markdown("---")
 
-        # Article exports
+        # Exports
+        from io import BytesIO
         col1, col2, col3 = st.columns(3)
 
         with col1:
@@ -551,7 +638,6 @@ with tabs[1]:
         with col3:
             doc = export_articles_docx(articles_df)
             if doc:
-                from io import BytesIO
                 buf = BytesIO()
                 doc.save(buf)
                 st.download_button(
