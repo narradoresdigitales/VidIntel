@@ -1,0 +1,10 @@
+streamlit
+requests
+pandas
+beautifulsoup4
+python-dateutil
+lxml
+feedparser
+langdetect
+python-docx
+google-api-python-client
