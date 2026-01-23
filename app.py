@@ -1,10 +1,11 @@
 
 # =========================================================
 # VidIntel — YouTube + RSS Article Discovery (Multilingual)
-# Streamlit Application (Refactored for improved UI/UX)
+# Streamlit Application (Refactored with Looser Article Search)
 # =========================================================
 
 import re
+import unicodedata
 import requests
 import pandas as pd
 import streamlit as st
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
-# Optional dependencies
+# Optional deps
 try:
     from langdetect import detect
 except Exception:
@@ -38,7 +39,7 @@ API_KEY = st.secrets.get("YOUTUBE_API_KEY", None)
 if not API_KEY:
     st.error(
         "❌ YouTube API key not found.\n\n"
-        "Please add it in **Streamlit → App settings → Secrets** as:\n\n"
+        "Add it in **Streamlit → App settings → Secrets** as:\n"
         "`YOUTUBE_API_KEY = \"your_key_here\"`"
     )
     st.stop()
@@ -102,11 +103,52 @@ REGIONS = [
 
 
 # =========================================================
-# YOUTUBE SEARCH (your existing logic, preserved)
+# Keyword Synonyms (language-aware) for Articles
+# Expand as needed for your common topics.
+# Keys should be lowercase.
+# =========================================================
+
+ARTICLE_KEYWORD_SYNONYMS = {
+    "en": {
+        "economy": ["economy", "economic", "economics", "finance", "inflation", "market", "markets", "gdp"],
+        "article": ["article", "report", "coverage", "story", "news"],
+        "ai": ["ai", "artificial intelligence", "machine learning", "ml"],
+    },
+    "es": {
+        "economy": ["economía", "economico", "económico", "economicos", "económicos",
+                    "finanzas", "inflación", "mercado", "mercados", "pib"],
+        "article": ["artículo", "articulo", "cobertura", "noticia", "informe", "reporte"],
+        "ai": ["ia", "inteligencia artificial", "aprendizaje automático", "aprendizaje estadístico"],
+    },
+    "fr": {
+        "economy": ["économie", "economie", "économique", "economique", "finance", "inflation", "marché", "marchés"],
+    },
+    # Add more languages/topics as needed…
+}
+
+
+# =========================================================
+# Utility: Normalization for accent-insensitive match
+# =========================================================
+def normalize_text(text: str) -> str:
+    """
+    Lowercase, strip accents/diacritics, and collapse whitespace.
+    """
+    if not text:
+        return ""
+    # Normalize to NFKD and remove combining marks (accents)
+    nfkd = unicodedata.normalize("NFKD", text)
+    base = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    base = base.lower()
+    return " ".join(base.split())
+
+
+# =========================================================
+# YOUTUBE SEARCH (existing logic, with small guards)
 # =========================================================
 
 def iso8601_to_seconds(iso):
-    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso or "")
+    m = re.match(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$", iso or "")
     if not m:
         return 0
     h = int(m.group(1) or 0)
@@ -141,10 +183,8 @@ def search_youtube(query, lang, region, max_results, published_after):
         "relevanceLanguage": lang,
         "key": API_KEY,
     }
-
     if region:
         params["regionCode"] = region
-
     if published_after:
         params["publishedAfter"] = published_after.isoformat().replace("+00:00", "Z")
         params["order"] = "date"
@@ -157,18 +197,15 @@ def search_youtube(query, lang, region, max_results, published_after):
 def fetch_video_details(video_ids):
     if not video_ids:
         return {}
-
     params = {
         "part": "contentDetails,statistics",
         "id": ",".join(video_ids),
         "key": API_KEY,
     }
-
     r = requests.get(VIDEOS_URL, params=params, timeout=30)
     r.raise_for_status()
 
     details = {}
-
     for item in r.json().get("items", []):
         vid = item.get("id")
         dur_iso = item.get("contentDetails", {}).get("duration")
@@ -177,7 +214,6 @@ def fetch_video_details(video_ids):
             "duration_sec": duration_sec,
             "views": int(item.get("statistics", {}).get("viewCount", 0)),
         }
-
     return details
 
 
@@ -240,7 +276,7 @@ def export_videos_docx(df):
 
 
 # =========================================================
-# ARTICLE SEARCH (RSS)
+# ARTICLE SEARCH (RSS) — Looser, smarter matching
 # =========================================================
 
 CURATED_RSS = {
@@ -308,16 +344,53 @@ def get_article_sources(language_code, user_url=None):
     return sources
 
 
-@st.cache_data(ttl=600)
-def fetch_articles(sources, days_back=7, keyword=None):
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_articles(
+    sources: dict,
+    days_back: int = 7,
+    keyword: str | None = None,
+    article_lang: str = "en",
+    loose_filter: bool = False,
+):
+    """
+    Fetch and filter articles from the given RSS/Atom sources.
+    - Full-text matching: title + summary + <content:encoded> when available
+    - Accent-insensitive and case-insensitive
+    - Language-aware synonyms expansion
+    - Optional 'loose_filter' to ignore keyword matching entirely
+    """
     from dateutil import parser as dateparser
+
     rows = []
+    cutoff_ts = datetime.now(timezone.utc).timestamp() - days_back * 86400
 
-    cutoff = datetime.now(timezone.utc).timestamp() - days_back * 86400
+    # Prepare keyword set:
+    # Split user keyword on commas or whitespace; expand with language-aware synonyms
+    expanded_terms = set()
+    if keyword:
+        # Split on commas first; then split each on whitespace
+        raw_parts = []
+        for chunk in keyword.split(","):
+            raw_parts.extend(chunk.strip().split())
 
+        for term in raw_parts:
+            t_norm = normalize_text(term)
+            if not t_norm:
+                continue
+
+            # Add the normalized user term
+            expanded_terms.add(t_norm)
+
+            # Add synonyms, if any
+            lang_map = ARTICLE_KEYWORD_SYNONYMS.get(article_lang, {})
+            if t_norm in lang_map:
+                for syn in lang_map[t_norm]:
+                    expanded_terms.add(normalize_text(syn))
+
+    # Pull feeds
     for name, url in sources.items():
         try:
-            resp = requests.get(url, timeout=10, headers={"User-Agent": "VidIntelBot/1.0"})
+            resp = requests.get(url, timeout=12, headers={"User-Agent": "VidIntelBot/1.0"})
             resp.raise_for_status()
             xml_text = resp.text
         except Exception:
@@ -338,46 +411,71 @@ def fetch_articles(sources, days_back=7, keyword=None):
                 link = (entry.link.text if entry.link else "").strip()
                 pub = (entry.pubDate.text if entry.pubDate else "").strip()
                 summary_html = (entry.description.text if entry.description else "")
+                # Full text (if present via content:encoded)
+                content_node = entry.find("content:encoded")
+                full_text = content_node.text if content_node else ""
             else:
-                # Atom format
                 title = (entry.title.text if entry.title else "").strip()
-                link_tag = entry.find("link")
+                # Atom link: pick rel="alternate" if present; else first href
+                link_tag = None
+                for l in entry.find_all("link"):
+                    if l.get("rel") == "alternate" and l.get("href"):
+                        link_tag = l
+                        break
+                if not link_tag:
+                    link_tag = entry.find("link")
                 link = (link_tag.get("href") if link_tag and link_tag.has_attr("href") else "").strip()
-                pub = (entry.updated.text if entry.updated else entry.published.text if entry.find("published") else "").strip()
-                summary_html = (entry.summary.text if entry.summary else "")
+                pub = (entry.updated.text if entry.find("updated") else
+                       entry.published.text if entry.find("published") else "").strip()
+                summary_html = (entry.summary.text if entry.find("summary") else "")
+                content_node = entry.find("content")
+                full_text = content_node.text if content_node else ""
 
-            # Parse timestamp
+            # Parse time and apply cutoff
             try:
                 ts = dateparser.parse(pub).timestamp() if pub else None
             except Exception:
                 ts = None
-
-            if ts and ts < cutoff:
+            if ts and ts < cutoff_ts:
                 continue
 
-            blob = f"{title} {summary_html}".lower()
-            if keyword and keyword.lower() not in blob:
-                continue
+            # Build full blob and normalize (accent-insensitive)
+            summary_txt = BeautifulSoup(summary_html, "html.parser").get_text().strip()
+            blob_norm = normalize_text(f"{title} {summary_txt} {full_text}")
+
+            # Apply keyword logic
+            if keyword and not loose_filter and expanded_terms:
+                if not any(term in blob_norm for term in expanded_terms):
+                    continue
+            # If loose_filter is True OR no keyword provided, accept based on date alone
 
             rows.append({
                 "Title": title,
                 "Source": name,
                 "Published": pub,
                 "URL": link,
-                "Summary": BeautifulSoup(summary_html, "html.parser").get_text().strip()
+                "Summary": summary_txt
             })
 
-    # Sort by Published desc when possible
+    # Sort newest first (try parse dates; push invalid to end)
     def sort_key(row):
-        from dateutil import parser as dateparser  # local import to satisfy cache hash
         try:
+            from dateutil import parser as dateparser  # local import for cache hashing
             return dateparser.parse(row["Published"])
         except Exception:
-            # Put unparsable dates at the bottom
             return datetime.min.replace(tzinfo=timezone.utc)
 
     rows.sort(key=sort_key, reverse=True)
     return pd.DataFrame(rows)
+
+
+def export_articles_txt(df):
+    parts = []
+    for _, r in df.iterrows():
+        parts.append(
+            f"{r['Title']} ({r['Source']})\n{r['Published']}\n{r['URL']}\n\n{r['Summary']}\n"
+        )
+    return "\n".join(parts)
 
 
 def export_articles_docx(df):
@@ -390,8 +488,9 @@ def export_articles_docx(df):
         p.add_run(r["Title"] + "\n").bold = True
         p.add_run(f"{r['Source']} — {r['Published']}\n")
         p.add_run(r["URL"] + "\n")
-        p.add_run("\nSummary:\n")
-        p.add_run(r["Summary"] + "\n")
+        if r.get("Summary"):
+            p.add_run("\nSummary:\n")
+            p.add_run(r["Summary"] + "\n")
     return doc
 
 
@@ -409,10 +508,10 @@ with st.sidebar:
         ["Videos", "Articles", "Both"]
     )
 
-    keyword = st.text_input("Keyword / Query", "", placeholder="e.g., AI, defense, inflation")
+    keyword = st.text_input("Keyword / Query", "", placeholder="e.g., economy, AI, defense")
 
     # -------------------------
-    # 🎬 Video Filters (readable labels)
+    # 🎬 Video Filters
     # -------------------------
     video_lang_label, lang = st.selectbox(
         "Video Language",
@@ -444,7 +543,7 @@ with st.sidebar:
     st.markdown("---")
 
     # -------------------------
-    # 📰 Article Filters (readable labels)
+    # 📰 Article Filters
     # -------------------------
     article_lang_label, article_lang = st.selectbox(
         "Article Language",
@@ -454,6 +553,7 @@ with st.sidebar:
     )
 
     days_back = st.slider("Article Days Back", 1, 30, 7)
+    loose_filter = st.checkbox("Loosen article filtering (ignore keyword match)", value=False)
     user_site = st.text_input("Auto-discover RSS from site (optional)", "", placeholder="https://example.com")
 
     run = st.button("🔍 Search", type="primary")
@@ -463,44 +563,43 @@ with st.sidebar:
 # Execution
 # =========================================================
 
-if run and not keyword.strip():
-    st.warning("Please enter a keyword.")
-    st.stop()
-
 videos_df = None
 articles_df = None
-article_sources_count = 0  # for UX caption
+article_sources_count = 0
 
 if run:
     # -------------------------
     # VIDEOS
     # -------------------------
     if content_type in ["Videos", "Both"]:
-        with st.spinner("Searching YouTube…"):
-            published_after = compute_published_after(date_filter)
-            items = search_youtube(keyword, lang, region, max_results, published_after)
+        if not keyword.strip():
+            st.warning("Enter a keyword to search YouTube videos (Videos tab).")
+        else:
+            with st.spinner("Searching YouTube…"):
+                published_after = compute_published_after(date_filter)
+                items = search_youtube(keyword, lang, region, max_results, published_after)
 
-            ids = [it["id"]["videoId"] for it in items]
-            details = fetch_video_details(ids)
+                ids = [it["id"]["videoId"] for it in items]
+                details = fetch_video_details(ids)
 
-            # Duration filtering
-            if duration_filter != "Any":
-                def ok(d):
-                    m = d / 60
-                    return (
-                        (duration_filter == "< 4 min" and m < 4) or
-                        (duration_filter == "5–10 min" and 5 <= m <= 10) or
-                        (duration_filter == "> 10 min" and m > 10)
-                    )
-                items = [
-                    it for it in items
-                    if ok(details.get(it["id"]["videoId"], {}).get("duration_sec", 0))
-                ]
+                # Duration filtering
+                if duration_filter != "Any":
+                    def ok(d):
+                        m = d / 60
+                        return (
+                            (duration_filter == "< 4 min" and m < 4) or
+                            (duration_filter == "5–10 min" and 5 <= m <= 10) or
+                            (duration_filter == "> 10 min" and m > 10)
+                        )
+                    items = [
+                        it for it in items
+                        if ok(details.get(it["id"]["videoId"], {}).get("duration_sec", 0))
+                    ]
 
-            if strict_lang:
-                items = strict_language_filter(items, lang)
+                if strict_lang:
+                    items = strict_language_filter(items, lang)
 
-            videos_df = youtube_to_dataframe(items, details)
+                videos_df = youtube_to_dataframe(items, details)
 
     # -------------------------
     # ARTICLES
@@ -509,10 +608,13 @@ if run:
         with st.spinner("Fetching articles…"):
             sources = get_article_sources(article_lang, user_site or None)
             article_sources_count = len(sources)
+
             articles_df = fetch_articles(
-                sources,
+                sources=sources,
                 days_back=days_back,
-                keyword=keyword
+                keyword=keyword if keyword.strip() else None,
+                article_lang=article_lang,
+                loose_filter=loose_filter
             )
 
 
@@ -579,11 +681,11 @@ with tabs[0]:
 # -------------------------
 with tabs[1]:
     st.markdown(
-        f"##### Filters: **{article_lang_label}** | Days back: **{days_back}** | Sources: **{article_sources_count}**"
+        f"##### Filters: **{article_lang_label}** | Days back: **{days_back}** | Sources: **{article_sources_count}** | Loosen: **{'On' if loose_filter else 'Off'}**"
     )
 
     if articles_df is None:
-        st.info("⚠️ Choose 'Articles' or 'Both' to search for news content.")
+        st.info("⚠️ Choose 'Articles' or 'Both' to fetch news content.")
     elif articles_df.empty:
         st.warning("No article results.")
     else:
@@ -611,7 +713,6 @@ with tabs[1]:
 
         st.markdown("---")
 
-        # Exports
         from io import BytesIO
         col1, col2, col3 = st.columns(3)
 
@@ -624,13 +725,9 @@ with tabs[1]:
             )
 
         with col2:
-            txt = "\n\n".join(
-                f"{r['Title']} ({r['Source']})\n{r['Published']}\n{r['URL']}\n\n{r['Summary']}"
-                for _, r in articles_df.iterrows()
-            )
             st.download_button(
                 "⬇️ TXT",
-                txt.encode("utf-8"),
+                export_articles_txt(articles_df).encode("utf-8"),
                 "articles.txt",
                 "text/plain"
             )
